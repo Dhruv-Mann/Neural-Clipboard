@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/YOUR_VIDEO_ID">
+  <a href="https://youtu.be/WsX91e3RrGg">
     <img src="https://img.shields.io/badge/▶_Watch_Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch Demo on YouTube" />
   </a>
 </p>
@@ -22,8 +22,8 @@
 ## Demo
 
 <p align="center">
-  <a href="https://youtu.be/YOUR_VIDEO_ID">
-    <img src="https://img.youtube.com/vi/YOUR_VIDEO_ID/maxresdefault.jpg" alt="Neural Clipboard Demo" width="720" />
+  <a href="https://youtu.be/WsX91e3RrGg">
+    <img src="https://img.youtube.com/vi/WsX91e3RrGg/maxresdefault.jpg" alt="Neural Clipboard Demo" width="720" />
   </a>
   <br/>
   <em>Click the thumbnail to watch the full demo on YouTube.</em>
