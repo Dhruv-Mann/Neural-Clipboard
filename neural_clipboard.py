@@ -1,19 +1,24 @@
 """
-Neural Clipboard – Phase 2
-Clipboard monitoring with a Privacy Mode toggle in the system tray.
+Neural Clipboard – Phase 3
+Queue-based architecture: the clipboard watcher produces items, a
+separate AI-processor thread consumes them.
 """
 
+import queue
 import threading
+import time
 import pyperclip
 import pystray
 from PIL import Image
 
-# ── Shared thread-safe signals ───────────────────────────────────────
-shutdown_event = threading.Event()   # Tells the watcher to stop
-privacy_event  = threading.Event()   # SET = privacy ON, CLEAR = privacy OFF
+# ── Shared thread-safe primitives ────────────────────────────────────
+shutdown_event = threading.Event()          # Tells every thread to stop
+privacy_event  = threading.Event()          # SET = privacy ON
 
-# We also need a reference to the tray icon so the watcher (or the
-# toggle callback) can swap the icon image at any time.
+# The bridge between the watcher (producer) and the AI processor
+# (consumer).  maxsize=0 means unlimited depth.
+ai_queue: queue.Queue[str] = queue.Queue()
+
 _tray_icon: pystray.Icon | None = None
 
 
@@ -27,10 +32,12 @@ def create_icon_image(color: tuple = COLOR_GREEN, size: int = 64) -> Image.Image
     return Image.new("RGB", (size, size), color=color)
 
 
-# ── Background clipboard watcher ─────────────────────────────────────
+# ── Thread 1 – Clipboard watcher (PRODUCER) ─────────────────────────
 def watcher_loop() -> None:
-    """Polls the clipboard every 0.5 s. Respects Privacy Mode and the
-    shutdown signal."""
+    """Polls the clipboard every 0.5 s.
+    • Privacy ON  → log & discard
+    • Privacy OFF → enqueue text for AI processing
+    """
     last_text = ""
     while not shutdown_event.is_set():
         try:
@@ -42,18 +49,36 @@ def watcher_loop() -> None:
             if privacy_event.is_set():
                 print("[Watcher] Privacy active: ignored")
             else:
-                print(f"[Watcher] New clip: {current_text}")
+                print(f"[Watcher] New clip → queue: {current_text}")
+                ai_queue.put(current_text)      # non-blocking enqueue
             last_text = current_text
 
-        # Sleep up to 0.5 s, but wake instantly on shutdown.
         shutdown_event.wait(timeout=0.5)
 
     print("[Watcher] Stopped.")
 
 
+# ── Thread 2 – AI processor (CONSUMER) ──────────────────────────────
+def ai_processor_loop() -> None:
+    """Blocks on the queue waiting for text.  Simulates a slow LLM API
+    call with time.sleep(3).  Uses queue.get(timeout=…) so it can
+    still check the shutdown flag periodically."""
+    while not shutdown_event.is_set():
+        try:
+            text = ai_queue.get(timeout=1)      # block up to 1 s
+        except queue.Empty:
+            continue                             # nothing yet – re-check shutdown
+
+        print(f"[AI] Processing: {text}")
+        time.sleep(3)                            # ← simulate LLM latency
+        print(f"[AI RESULT] Analyzed: {text}")
+        ai_queue.task_done()                     # mark item complete
+
+    print("[AI Processor] Stopped.")
+
+
 # ── Tray menu callbacks ─────────────────────────────────────────────
 def on_toggle_privacy(icon: pystray.Icon, item: pystray.MenuItem) -> None:
-    """Flip privacy mode and swap the icon color."""
     if privacy_event.is_set():
         privacy_event.clear()
         icon.icon = create_icon_image(COLOR_GREEN)
@@ -67,7 +92,6 @@ def on_toggle_privacy(icon: pystray.Icon, item: pystray.MenuItem) -> None:
 
 
 def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
-    """Clean shutdown: signal the watcher, then tear down the tray."""
     print("[Tray] Exit requested – shutting down...")
     shutdown_event.set()
     icon.stop()
@@ -77,8 +101,11 @@ def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
 def main() -> None:
     global _tray_icon
 
-    watcher = threading.Thread(target=watcher_loop, daemon=True)
+    # Launch both daemon threads
+    watcher = threading.Thread(target=watcher_loop, name="watcher", daemon=True)
+    ai_proc = threading.Thread(target=ai_processor_loop, name="ai_proc", daemon=True)
     watcher.start()
+    ai_proc.start()
 
     _tray_icon = pystray.Icon(
         name="NeuralClipboard",
@@ -86,7 +113,6 @@ def main() -> None:
         title="Neural Clipboard",
         menu=pystray.Menu(
             pystray.MenuItem(
-                # The lambda makes the checkmark reflect the live state.
                 "Privacy Mode",
                 on_toggle_privacy,
                 checked=lambda item: privacy_event.is_set(),
@@ -99,6 +125,7 @@ def main() -> None:
 
     shutdown_event.set()
     watcher.join(timeout=3)
+    ai_proc.join(timeout=5)   # give the AI thread a bit longer to finish
     print("[Main] Clean shutdown complete.")
 
 
