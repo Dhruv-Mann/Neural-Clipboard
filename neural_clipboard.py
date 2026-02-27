@@ -2,11 +2,13 @@
 Neural Clipboard – Final Phase
 Queue-based architecture with Gemini AI integration and Desktop Notifications.
 """
-
+# This library module helps in interacting with the operating system.
 import os
+
+# This provides thread-safe FIFO(First In First Out) queues. Used here to safely
+# pass clipboard data between threads without race conditions.
 import queue
 import threading
-import time
 import pyperclip
 import pystray
 from PIL import Image
