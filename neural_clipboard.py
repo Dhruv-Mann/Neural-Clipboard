@@ -1,43 +1,37 @@
 """
-Neural Clipboard – Phase 3
-Queue-based architecture: the clipboard watcher produces items, a
-separate AI-processor thread consumes them.
+Neural Clipboard – Final Phase
+Queue-based architecture with Gemini AI integration and Desktop Notifications.
 """
 
+import os
 import queue
 import threading
 import time
 import pyperclip
 import pystray
 from PIL import Image
+from dotenv import load_dotenv
+from google import genai
+from plyer import notification
 
-# ── Shared thread-safe primitives ────────────────────────────────────
-shutdown_event = threading.Event()          # Tells every thread to stop
-privacy_event  = threading.Event()          # SET = privacy ON
+# ── 1. Load Environment Variables ─────────────────────────────────────
+load_dotenv() 
 
-# The bridge between the watcher (producer) and the AI processor
-# (consumer).  maxsize=0 means unlimited depth.
-ai_queue: queue.Queue[str] = queue.Queue()
+# ── 2. Shared Thread-Safe Signals ────────────────────────────────────
+shutdown_event = threading.Event()
+privacy_event  = threading.Event()
+ai_queue = queue.Queue()
 
-_tray_icon: pystray.Icon | None = None
-
-
-# ── Icon generation ──────────────────────────────────────────────────
+_tray_icon = None
 COLOR_GREEN = (0, 180, 0)
 COLOR_RED   = (200, 0, 0)
 
-
-def create_icon_image(color: tuple = COLOR_GREEN, size: int = 64) -> Image.Image:
+def create_icon_image(color=COLOR_GREEN, size=64):
     """Generate a solid-color square icon in memory."""
     return Image.new("RGB", (size, size), color=color)
 
-
-# ── Thread 1 – Clipboard watcher (PRODUCER) ─────────────────────────
-def watcher_loop() -> None:
-    """Polls the clipboard every 0.5 s.
-    • Privacy ON  → log & discard
-    • Privacy OFF → enqueue text for AI processing
-    """
+# ── 3. Background Clipboard Watcher (Producer) ──────────────────────
+def watcher_loop():
     last_text = ""
     while not shutdown_event.is_set():
         try:
@@ -49,36 +43,121 @@ def watcher_loop() -> None:
             if privacy_event.is_set():
                 print("[Watcher] Privacy active: ignored")
             else:
-                print(f"[Watcher] New clip → queue: {current_text}")
-                ai_queue.put(current_text)      # non-blocking enqueue
+                print(f"[Watcher] New clip -> queue: {current_text[:30]}...")
+                ai_queue.put(current_text)
             last_text = current_text
 
         shutdown_event.wait(timeout=0.5)
-
     print("[Watcher] Stopped.")
 
+# ── 4. AI Processor (Consumer) ──────────────────────────────────────
+# Model priority list – override with GEMINI_MODEL in .env
+DEFAULT_MODELS = ["gemini-2.5-flash"]
+MAX_RETRIES    = 3
+BASE_DELAY     = 5  # seconds
 
-# ── Thread 2 – AI processor (CONSUMER) ──────────────────────────────
-def ai_processor_loop() -> None:
-    """Blocks on the queue waiting for text.  Simulates a slow LLM API
-    call with time.sleep(3).  Uses queue.get(timeout=…) so it can
-    still check the shutdown flag periodically."""
+def _try_generate(client, model, prompt):
+    """Attempt a single generate_content call. Returns (result_text, None) on
+    success or (None, error_string) on failure."""
+    try:
+        response = client.models.generate_content(model=model, contents=prompt)
+        return response.text.strip(), None
+    except Exception as e:
+        return None, str(e)
+
+def ai_processor_loop():
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("[API Error] GEMINI_API_KEY not found in .env – AI processor disabled.")
+        return
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(f"[API Error] Failed to initialize Gemini Client: {e}")
+        return
+
+    # Build the model list: user override first, then defaults
+    env_model = os.getenv("GEMINI_MODEL", "").strip()
+    models_to_try = ([env_model] if env_model else []) + DEFAULT_MODELS
+    # Deduplicate while preserving order
+    seen = set()
+    models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
+
+    print(f"[AI] Model priority: {models_to_try}")
+
     while not shutdown_event.is_set():
         try:
-            text = ai_queue.get(timeout=1)      # block up to 1 s
+            text = ai_queue.get(timeout=1)
         except queue.Empty:
-            continue                             # nothing yet – re-check shutdown
+            continue
 
-        print(f"[AI] Processing: {text}")
-        time.sleep(3)                            # ← simulate LLM latency
-        print(f"[AI RESULT] Analyzed: {text}")
-        ai_queue.task_done()                     # mark item complete
+        print("[AI] Analyzing...")
+        prompt = ("Analyze this clipboard text. Classify it strictly as one of "
+                  "the following: [CODE, URL, ADDRESS, TASK, GENERAL]. "
+                  f"Then provide a 1-sentence summary. Text: {text}")
 
+        success = False
+        for model in models_to_try:
+            for attempt in range(1, MAX_RETRIES + 1):
+                result, err = _try_generate(client, model, prompt)
+
+                if result is not None:
+                    print(f"[AI RESULT] (model={model})\n{result}")
+                    try:
+                        notification.notify(
+                            title="Neural Clipboard",
+                            message=result[:256],
+                            app_name="Neural Clipboard",
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
+                    success = True
+                    break  # break retry loop
+
+                # ── Handle specific error codes ──
+                if "404" in err or "NOT_FOUND" in err:
+                    print(f"[AI] Model '{model}' not found – skipping.")
+                    break  # skip to next model, no point retrying
+
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    if "limit: 0" in err:
+                        print(f"[AI] Free-tier quota is 0 for '{model}' – "
+                              "enable billing or try another model. Skipping.")
+                        break  # skip to next model
+                    delay = BASE_DELAY * (2 ** (attempt - 1))
+                    print(f"[AI] Rate-limited on '{model}' – "
+                          f"retry {attempt}/{MAX_RETRIES} in {delay}s...")
+                    shutdown_event.wait(timeout=delay)
+                    if shutdown_event.is_set():
+                        break
+                    continue
+
+                # Unknown error – log and skip to next model
+                print(f"[API Error] {model} attempt {attempt}: {err}")
+                break
+
+            if success or shutdown_event.is_set():
+                break  # break model loop
+
+        if not success and not shutdown_event.is_set():
+            print("[API Error] All models failed. Check your API key / billing.")
+            try:
+                notification.notify(
+                    title="Neural Clipboard Error",
+                    message="All AI models failed. Check API key & billing.",
+                    app_name="Neural Clipboard",
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        ai_queue.task_done()
     print("[AI Processor] Stopped.")
 
-
-# ── Tray menu callbacks ─────────────────────────────────────────────
-def on_toggle_privacy(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+# ── 5. Tray Menu Callbacks ──────────────────────────────────────────
+def on_toggle_privacy(icon, item):
     if privacy_event.is_set():
         privacy_event.clear()
         icon.icon = create_icon_image(COLOR_GREEN)
@@ -90,20 +169,18 @@ def on_toggle_privacy(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         icon.title = "Neural Clipboard (Privacy)"
         print("[Tray] Privacy Mode ON")
 
-
-def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+def on_exit(icon, item):
     print("[Tray] Exit requested – shutting down...")
     shutdown_event.set()
     icon.stop()
 
-
-# ── Entry point ──────────────────────────────────────────────────────
-def main() -> None:
+# ── 6. Main Entry Point ─────────────────────────────────────────────
+def main():
     global _tray_icon
 
-    # Launch both daemon threads
-    watcher = threading.Thread(target=watcher_loop, name="watcher", daemon=True)
-    ai_proc = threading.Thread(target=ai_processor_loop, name="ai_proc", daemon=True)
+    watcher = threading.Thread(target=watcher_loop, daemon=True)
+    ai_proc = threading.Thread(target=ai_processor_loop, daemon=True)
+    
     watcher.start()
     ai_proc.start()
 
@@ -121,13 +198,12 @@ def main() -> None:
         ),
     )
 
-    _tray_icon.run()           # blocks until icon.stop()
+    _tray_icon.run()
 
     shutdown_event.set()
     watcher.join(timeout=3)
-    ai_proc.join(timeout=5)   # give the AI thread a bit longer to finish
+    ai_proc.join(timeout=5)
     print("[Main] Clean shutdown complete.")
-
 
 if __name__ == "__main__":
     main()
