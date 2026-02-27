@@ -1,5 +1,5 @@
 """
-Neural Clipboard – Phase 1
+Neural Clipboard - Phase 1
 A Windows background service with a system tray icon and a daemon watcher thread.
 """
 
