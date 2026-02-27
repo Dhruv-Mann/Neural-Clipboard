@@ -7,13 +7,40 @@ import os
 
 # This provides thread-safe FIFO(First In First Out) queues. Used here to safely
 # pass clipboard data between threads without race conditions.
+
+# A race condition in a threading program is an undesirable situation that occurs when
+# multiple threads concurrently access and modify the same shared resource (like a variable, object, or file)
+# and the final outcome of the program depends on the unpredictable order or timing of their execution.
+# This leads to inconsistent and unexpected results, making the program's behavior unreliable.
 import queue
+
+# This enables running multiple threads concurrently — e.g., one thread monitors the clipboard
+# while another processes items, all without blocking each other.
 import threading
+
+# Third-party library that provides cross-platform copy/paste clipboard access 
 import pyperclip
+
+# Creates a system tray icon (the little icons in your taskbar).
+# Lets the app run in the background with a right-click menu to interact with it.
 import pystray
+
+# From Pillow (image processing library).
+# Image is used here to create/load the icon image that pystray displays in the system tray.
+# Basically we did this so that a image of 64x64 pixels is directly created in computer's ram
+# instead of manually uploading a file from the computer's storage.
 from PIL import Image
+
+# Loads environment variables from a .env file into os.environ.
+# This is how the app securely reads API keys without hardcoding them.
 from dotenv import load_dotenv
+
+# Google's Generative AI SDK — provides access to Gemini models for 
+# AI-powered text generation/processing. This is the brain of the app.
 from google import genai
+
+# Cross-platform library for desktop notifications (toast popups).
+# Used to notify you when something happens (e.g., clipboard processed, AI response ready).
 from plyer import notification
 
 # ── 1. Load Environment Variables ─────────────────────────────────────
